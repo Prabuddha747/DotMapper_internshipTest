@@ -177,6 +177,40 @@ def test_run_dispatches_to_search(df):
     assert result["data"]["count"] == 20
 
 
+# --- correlation: Pearson correlation between two numeric fields ---
+
+def test_correlation_ground_truth(df):
+    result = qe.correlation(df, field="customer_rating", field_b="resolution_time_hrs")
+    assert result["data"]["correlation"] == 0.0011
+    assert result["data"]["matched"] == 327
+
+
+def test_correlation_non_numeric_field_rejected(df):
+    with pytest.raises(ValueError, match="not numeric"):
+        qe.correlation(df, field="agent_id", field_b="customer_rating")
+
+
+def test_correlation_respects_filters(df):
+    result = qe.correlation(df, field="customer_rating", field_b="resolution_time_hrs", filters={"category": "Technical"})
+    assert result["rows_used"] == result["data"]["matched"]
+
+
+def test_correlation_insufficient_data_returns_none_not_a_crash(df):
+    result = qe.correlation(df, field="customer_rating", field_b="resolution_time_hrs", filters={"priority": "Nonexistent"})
+    assert result["data"]["correlation"] is None
+    assert "not enough" in result["answer"].lower()
+
+
+def test_correlation_values_are_json_serializable(df):
+    result = qe.correlation(df, field="customer_rating", field_b="resolution_time_hrs")
+    json.dumps(result)
+
+
+def test_run_dispatches_to_correlation(df):
+    result = qe.run(df, "correlation", field="customer_rating", field_b="resolution_time_hrs")
+    assert result["data"]["correlation"] == 0.0011
+
+
 def test_comparison_filter_gt(df):
     result = qe.count(df, filters={"resolution_time_hrs": {"gt": 12}})
     expected = (df["resolution_time_hrs"] > 12).sum()

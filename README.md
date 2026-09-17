@@ -31,7 +31,7 @@ support_tickets.csv → ingestion.py → in-memory pandas DataFrame (app.state)
                        ┌────────────────────┼────────────────────┐
                        ▼                                          ▼
                  query_engine.py                            anomaly.py
-  (count/filter/group+rank/avg/sum/min/max/ratio/equalize/search)  (IQR + rules)
+(count/filter/group+rank/avg/sum/min/max/ratio/correlation/equalize/search) (IQR + rules)
                        ▲
                        │ structured intent (JSON)
                     llm.py ── Groq API
@@ -62,9 +62,13 @@ none of the operations need a persistence layer beyond the source CSV.
   per-category ranking by average/sum of a field, ascending or descending,
   and a top-N limit), average, sum, min, max (each identifying *which*
   ticket produced the value), **ratio** (sum/average of two fields plus
-  their ratio), **equalize** (see §6), and **search** (substring match on
-  issue descriptions) — each with optional equality, multi-value, and
+  their ratio), **correlation** (Pearson correlation between two fields),
+  **equalize** (see §6), and **search** (substring match on issue
+  descriptions) — each with optional equality, multi-value, and
   numeric-comparison (`>`, `>=`, `<`, `<=`) filters.
+- **Follow-up questions** — a short follow-up ("...and by agent?", "what
+  about Critical?") inherits the previous question's filters/fields
+  instead of needing to be fully self-contained.
 - **Anomaly detection** — three independent, explainable rules (overdue
   unresolved tickets, statistical resolution-time outliers, data-quality
   violations).
@@ -106,6 +110,12 @@ different Python 3.x interpreter on your PATH (e.g. `python3.12 -m venv .venv`).
 
 ```bash
 uvicorn app.main:app --reload
+```
+
+Or with Docker (no local Python setup at all — needs `.env` from step 4 first):
+
+```bash
+docker compose up --build
 ```
 
 - UI: `http://127.0.0.1:8000`
@@ -195,6 +205,21 @@ statuses to make Open, Escalated, and Resolved equal?"**
 {"operation": "search", "keyword": "login failure"} → "12 ticket(s) mention 'login failure', showing 12."
 ```
 
+**"Is a lower customer rating associated with a longer resolution time?"**
+```
+{"operation": "correlation", "field": "customer_rating", "field_b": "resolution_time_hrs"} → "Correlation between customer_rating and resolution_time_hrs: 0.0011 (over 327 tickets with both values)."
+```
+
+**Follow-up question, no restated filters:**
+```
+Q1: "What is the average customer rating for Technical category tickets?"
+→ {"operation": "average", "field": "customer_rating", "filters": {"category": "Technical"}} → 3.74
+
+Q2: "...and by agent?"
+→ {"operation": "group_count", "group_by": "agent_id", "field": "customer_rating", "filters": {"category": "Technical"}}
+→ "Top agent_id by average customer_rating (desc): AGT-04 (4.67)."
+```
+
 ## 7. Edge cases handled
 
 These were found and fixed by adversarially testing the running system
@@ -274,18 +299,16 @@ ancient.
 - Parse an explicit N-hour threshold out of the question text for
   SLA-style queries, instead of relying on a fixed 24-hour anomaly rule or
   a single manually-specified comparison filter.
-- A lightweight per-session conversation history, so a follow-up question
-  ("...and by agent?") can inherit filters from the previous one instead of
-  needing to be fully self-contained.
-- Containerize with a single `Dockerfile`/`docker compose up`, if the
-  system needs to run somewhere other than a local evaluator machine.
 - Expand `equalize`-style closed-form operations to other useful
   what-if-shaped-but-actually-deterministic questions, if real usage shows
   more of them.
-- A `correlation` operation (e.g. "is a lower rating associated with a
-  longer resolution time?") — `df[a].corr(df[b])` is the same "pure
-  arithmetic on real columns" safety class as `ratio`, just not built yet
-  since no question has asked for it live.
+- The follow-up context (§3) is a single global "last question" slot, not
+  actually keyed per client/session — correct for a local, single-
+  evaluator run, wrong the moment two people query concurrently. Key it by
+  a client-supplied id if that ever matters.
+- A real production deployment (behind a reverse proxy, with the Docker
+  image pushed to a registry and run with restart policies) rather than
+  the local `docker compose up` this repo ships.
 
 ## 12. Testing
 
@@ -295,14 +318,19 @@ pytest -m live                            # + real Groq smoke tests (needs GROQ_
 pytest --cov=app --cov-report=term-missing
 ```
 
-120 tests total (113 mocked + 7 live), 100% statement coverage on `app/`:
+132 tests total (123 mocked + 9 live), 100% statement coverage on `app/`:
 ingestion/schema validation, every query operation (including comparison
-filters, JSON-serialization safety, and the `ratio`/`equalize`/`search`
-operations and `group_count`'s field-ranking mode), all anomaly rules
-including boundary and degenerate cases, LLM intent validation against a
-mocked Groq client (malformed JSON, rate limits, case-insensitive enums,
-dropped filters, missing key), and FastAPI endpoint behavior including
-graceful degradation and evidence-envelope checks. The live tests hit the
-real Groq API to catch semantic failures a mock can't: off-topic questions,
-hypothetical/what-if questions, the compound sum-and-ratio question, and
-known-answer questions verified against the real dataset.
+filters, JSON-serialization safety, and the `ratio`/`equalize`/`search`/
+`correlation` operations and `group_count`'s field-ranking mode), all
+anomaly rules including boundary and degenerate cases, LLM intent
+validation against a mocked Groq client (malformed JSON, rate limits,
+case-insensitive enums, dropped filters, missing key, follow-up context
+correctly included/excluded from the message history), and FastAPI
+endpoint behavior including graceful degradation and evidence-envelope
+checks. The live tests hit the real Groq API to catch semantic failures a
+mock can't: off-topic questions, hypothetical/what-if questions, the
+compound sum-and-ratio question, a follow-up question correctly inheriting
+filters, and known-answer questions verified against the real dataset.
+The Docker image and `docker compose up` path were built and verified by
+actually running the container end-to-end (`/health`, `/api/query`), not
+just written and assumed to work.

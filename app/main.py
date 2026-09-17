@@ -25,6 +25,7 @@ qe.OPERATIONS["anomaly_summary"] = anomaly.summary
 async def lifespan(app: FastAPI):
     """Load the CSV once into memory; app.state.df is the store for the process lifetime."""
     app.state.df = load_tickets(DATA_PATH)
+    app.state.last_intent = None  # ponytail: single global slot, not per-client — fine for a local single-evaluator app; key by a client id if concurrent multi-user follow-ups are ever needed
     yield
 
 
@@ -51,7 +52,7 @@ def api_query(request: QueryRequest) -> dict:
     the answer text came from a real pandas computation, not the model.
     """
     base = {"question": request.question, "source": DATA_SOURCE, "timestamp": datetime.now(timezone.utc).isoformat()}
-    intent = llm.extract_intent(request.question)
+    intent = llm.extract_intent(request.question, previous=app.state.last_intent)
     operation = intent.pop("operation")
 
     if operation == "error":
@@ -64,6 +65,7 @@ def api_query(request: QueryRequest) -> dict:
         # an unexpected data-shape issue into a raw 500.
         return {**base, "operation": "error", "answer": f"Couldn't compute that: {exc}"}
 
+    app.state.last_intent = {"question": request.question, "intent": {"operation": operation, **intent}}
     return {**base, "operation": operation, **intent, **result}
 
 

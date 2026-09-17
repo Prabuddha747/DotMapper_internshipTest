@@ -15,7 +15,7 @@ from app.anomaly import ENUM_VALUES
 from app.ingestion import REQUIRED_COLUMNS
 from app.query_engine import NUMERIC_FIELDS
 
-OPERATIONS = ["count", "filter", "group_count", "average", "sum", "min", "max", "anomaly_summary", "equalize", "ratio", "search"]
+OPERATIONS = ["count", "filter", "group_count", "average", "sum", "min", "max", "anomaly_summary", "equalize", "ratio", "search", "correlation"]
 GROUPABLE_COLUMNS = ["agent_id", "category", "priority", "status"]
 
 
@@ -41,6 +41,8 @@ def _build_system_prompt() -> str:
         '{"operation": "ratio", "field": "<numeric field A>", "field_b": "<numeric field B>", "agg": "sum"|"average", "filters": {...}}\n'
         '{"operation": "search", "keyword": "<text>", "filters": {...}, "limit": 50} '
         '(substring match on issue_summary, e.g. "tickets mentioning login failure")\n'
+        '{"operation": "correlation", "field": "<numeric field A>", "field_b": "<numeric field B>", "filters": {...}} '
+        '(e.g. "is a lower rating associated with a longer resolution time?")\n'
         '{"operation": "error", "reason": "<why this question can\'t be answered>"}\n\n'
         'For plain group_count (counting tickets per category, no "field"), the '
         'response also reports each category\'s percentage share of the total — '
@@ -81,7 +83,15 @@ def _build_system_prompt() -> str:
         "distribution back: these operations only read the real, current "
         "data and cannot simulate that, so respond with the JSON error form, "
         "reason: this system only answers questions about the actual current "
-        "data, it can't simulate hypothetical changes."
+        "data, it can't simulate hypothetical changes.\n\n"
+        "If the conversation includes a previous question and its resolved "
+        "JSON intent, and the CURRENT question is a short follow-up that "
+        "doesn't stand on its own (e.g. \"...and by agent?\", \"what about "
+        "Critical?\", \"same thing but for Billing\"), inherit whatever the "
+        "follow-up doesn't override from the previous intent (filters, "
+        "group_by, field) and only change what it actually asks to change. "
+        "If the current question is fully self-contained and unrelated to "
+        "the previous one, ignore the previous intent entirely."
     )
 
 
@@ -182,26 +192,39 @@ def _validate_intent(raw: dict) -> dict:
         intent["field_b"] = field_b
         intent["agg"] = raw.get("agg") if raw.get("agg") in ("sum", "average") else "sum"
 
+    if operation == "correlation":
+        field, field_b = raw.get("field"), raw.get("field_b")
+        if field not in NUMERIC_FIELDS or field_b not in NUMERIC_FIELDS:
+            return {"operation": "error", "reason": f"invalid field(s) for correlation from LLM: {field!r}, {field_b!r}"}
+        intent["field"] = field
+        intent["field_b"] = field_b
+
     if operation == "filter":
         intent["limit"] = raw.get("limit") if isinstance(raw.get("limit"), int) else 50
 
     return intent
 
 
-def extract_intent(question: str) -> dict:
-    """Question -> validated intent dict, or an {"operation": "error"} dict. Never raises."""
+def extract_intent(question: str, previous: dict | None = None) -> dict:
+    """Question -> validated intent dict, or an {"operation": "error"} dict.
+    Never raises. `previous`, if given, is {"question": str, "intent": dict}
+    from the prior turn — lets a short follow-up ("...and by agent?")
+    inherit filters/fields instead of needing to be fully self-contained."""
     if not config.GROQ_API_KEY:
         return {"operation": "error", "reason": "GROQ_API_KEY not configured"}
+
+    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if previous:
+        messages.append({"role": "user", "content": previous["question"]})
+        messages.append({"role": "assistant", "content": json.dumps(previous["intent"])})
+    messages.append({"role": "user", "content": question})
 
     try:
         # timeout + max_retries are the SDK's own handling — no hand-rolled retry loop needed.
         client = Groq(api_key=config.GROQ_API_KEY, timeout=5.0, max_retries=1)
         response = client.chat.completions.create(
             model=config.GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": question},
-            ],
+            messages=messages,
             response_format={"type": "json_object"},
             temperature=0,
         )

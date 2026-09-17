@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -71,6 +72,44 @@ def test_search_missing_keyword_becomes_error():
     with _mock_groq_returning('{"operation": "search"}'):
         intent = llm.extract_intent("search for something")
     assert intent["operation"] == "error"
+
+
+def test_valid_correlation_intent_passes_through():
+    with _mock_groq_returning(
+        '{"operation": "correlation", "field": "customer_rating", "field_b": "resolution_time_hrs"}'
+    ):
+        intent = llm.extract_intent("Is a lower rating associated with a longer resolution time?")
+    assert intent == {
+        "operation": "correlation", "filters": {},
+        "field": "customer_rating", "field_b": "resolution_time_hrs",
+    }
+
+
+def test_correlation_invalid_field_becomes_error():
+    with _mock_groq_returning('{"operation": "correlation", "field": "agent_id", "field_b": "customer_rating"}'):
+        intent = llm.extract_intent("correlation of agent_id and rating?")
+    assert intent["operation"] == "error"
+
+
+def test_extract_intent_without_previous_sends_no_history():
+    with _mock_groq_returning('{"operation": "count", "filters": {}}') as mock_groq:
+        llm.extract_intent("How many tickets?")
+    sent_messages = mock_groq.return_value.chat.completions.create.call_args.kwargs["messages"]
+    assert len(sent_messages) == 2  # system + the one question, no follow-up context
+
+
+def test_extract_intent_with_previous_includes_it_as_history():
+    previous = {
+        "question": "average rating for Technical tickets?",
+        "intent": {"operation": "average", "field": "customer_rating", "filters": {"category": "Technical"}},
+    }
+    with _mock_groq_returning('{"operation": "group_count", "group_by": "agent_id"}') as mock_groq:
+        llm.extract_intent("...and by agent?", previous=previous)
+    sent_messages = mock_groq.return_value.chat.completions.create.call_args.kwargs["messages"]
+    assert len(sent_messages) == 4  # system, previous question, previous intent, new question
+    assert sent_messages[1] == {"role": "user", "content": previous["question"]}
+    assert json.loads(sent_messages[2]["content"]) == previous["intent"]
+    assert sent_messages[3] == {"role": "user", "content": "...and by agent?"}
 
 
 def test_valid_average_intent_passes_through():
@@ -311,6 +350,27 @@ def test_live_group_count_question_picks_agent_id():
     intent = llm.extract_intent("Which agent resolved the most tickets?")
     assert intent["operation"] == "group_count"
     assert intent["group_by"] == "agent_id"
+
+
+@pytest.mark.live
+def test_live_correlation_question_picks_correct_fields():
+    intent = llm.extract_intent("Is a lower customer rating associated with a longer resolution time?")
+    assert intent["operation"] == "correlation"
+    assert {intent["field"], intent["field_b"]} == {"customer_rating", "resolution_time_hrs"}
+
+
+@pytest.mark.live
+def test_live_followup_question_inherits_previous_filters():
+    # Reproduces the requested use case: a follow-up that only names what
+    # changes ("...and by agent?") must inherit the previous question's
+    # filters, not get treated as a standalone unfilterable question.
+    first = llm.extract_intent("What is the average customer rating for Technical category tickets?")
+    assert first["operation"] == "average"
+    previous = {"question": "What is the average customer rating for Technical category tickets?", "intent": first}
+    followup = llm.extract_intent("...and by agent?", previous=previous)
+    assert followup["operation"] == "group_count"
+    assert followup["filters"].get("category") == "Technical"
+    assert followup["field"] == "customer_rating"
 
 
 @pytest.mark.live

@@ -190,6 +190,22 @@ def ratio(df: pd.DataFrame, field: str | None = None, field_b: str | None = None
     return _pack(answer, data, unmatched, rows_used=len(filtered))
 
 
+def correlation(df: pd.DataFrame, field: str | None = None, field_b: str | None = None,
+                filters: dict | None = None, **_) -> dict:
+    """Pearson correlation between two numeric fields. Pure arithmetic on
+    real paired rows — same safety class as ratio()/average()."""
+    _validate_numeric_field(field)
+    _validate_numeric_field(field_b)
+    filtered, unmatched = _apply_filters(df, filters)
+    paired = filtered[[field, field_b]].dropna()
+    if len(paired) < 2:
+        answer = f"Not enough overlapping data to compute a correlation between {field} and {field_b}."
+        return _pack(answer, {"correlation": None, "matched": len(paired)}, unmatched, rows_used=len(paired))
+    r = round(paired[field].corr(paired[field_b]), 4)
+    answer = f"Correlation between {field} and {field_b}: {r} (over {len(paired)} tickets with both values)."
+    return _pack(answer, {"correlation": r, "matched": len(paired)}, unmatched, rows_used=len(paired))
+
+
 def equalize(df: pd.DataFrame, group_by: str | None = None, filters: dict | None = None, **_) -> dict:
     """Minimum tickets that must move between group_by's categories so each
     holds an equal share of the real current data. Pure arithmetic on real
@@ -239,6 +255,7 @@ OPERATIONS = {
     "ratio": ratio,
     "equalize": equalize,
     "search": search,
+    "correlation": correlation,
 }
 
 

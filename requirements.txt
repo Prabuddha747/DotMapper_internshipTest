@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pandas
+python-dotenv
+groq
+pytest
+pytest-cov
+httpx

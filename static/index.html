@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Support Intelligence</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Support Intelligence</h1>
+      <p class="subtitle">AI-powered customer support analytics</p>
+    </div>
+    <!-- Populated from GET /health -->
+    <span id="health-badge" class="health-badge">Checking…</span>
+  </header>
+
+  <div class="layout">
+    <!-- Chat-style Q&A: history persists across questions in this session. -->
+    <section class="chat-panel">
+      <div id="chat-history" class="chat-history">
+        <div class="chat-msg ai">
+          <p>Ask me anything about your support tickets — counts, agent performance, averages, or anomalies.</p>
+          <div class="examples">
+            <button type="button" class="example-btn">How many tickets are currently open?</button>
+            <button type="button" class="example-btn">Which agent resolved the most tickets this month?</button>
+            <button type="button" class="example-btn">Show me all Critical tickets not resolved within 12 hours.</button>
+            <button type="button" class="example-btn">What is the average customer rating for Technical category tickets?</button>
+            <button type="button" class="example-btn">Are there any anomalies in resolution times this week?</button>
+          </div>
+        </div>
+      </div>
+      <form id="ask-form">
+        <input type="text" id="question-input" placeholder="Ask a question about your support tickets…" autocomplete="off" required />
+        <button type="submit">Ask</button>
+      </form>
+    </section>
+
+    <!-- Populated from GET /api/stats and /api/anomalies on load -->
+    <aside class="sidebar">
+      <div class="panel">
+        <h2>Key metrics</h2>
+        <div class="stats-grid">
+          <div class="stat-card"><span class="stat-value" id="stat-total">—</span><span class="stat-label">Total tickets</span></div>
+          <div class="stat-card"><span class="stat-value" id="stat-open">—</span><span class="stat-label">Open</span></div>
+          <div class="stat-card"><span class="stat-value" id="stat-escalated">—</span><span class="stat-label">Escalated</span></div>
+          <div class="stat-card"><span class="stat-value" id="stat-anomalies">—</span><span class="stat-label">Anomalies</span></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Tickets by status</h2>
+        <div class="donut-row">
+          <div id="status-donut" class="donut"></div>
+          <ul id="status-legend" class="legend"></ul>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Tickets by priority</h2>
+        <div id="priority-bars" class="bar-chart"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Recent anomalies</h2>
+        <div id="anomalies-list">Loading…</div>
+      </div>
+    </aside>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -104,10 +104,10 @@ function renderPriorityBars(byPriority) {
 // Human-readable one-liner per anomaly rule shape (see app/anomaly.py).
 function describeAnomaly(item) {
   if (item.rule === 'overdue_unresolved') {
-    return `${item.priority}/${item.status}, ${item.age_hours}h old`;
+    return `${item.priority}/${item.status}, ${item.age_hours}h old (${item.over_by_hours}h over the ${item.threshold_hours}h threshold)`;
   }
   if (item.rule === 'resolution_outlier') {
-    return `resolved in ${item.resolution_time_hrs}h (threshold ${item.threshold_hrs}h)`;
+    return `resolved in ${item.resolution_time_hrs}h, ${item.deviation_hrs}h over the ${item.threshold_hrs}h threshold`;
   }
   return item.issue;
 }
@@ -187,6 +187,23 @@ function appendChatMessage(role, text, table) {
 
 let questionInFlight = false; // one request at a time — rapid re-clicks burn the free-tier Groq quota fast
 
+// One id per browser tab session, so a follow-up ("...and by agent?") only
+// ever inherits context from this tab's own previous question, never
+// another visitor's. Persisted so a page refresh keeps the same session.
+function getSessionId() {
+  try {
+    let id = localStorage.getItem('sessionId');
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem('sessionId', id);
+    }
+    return id;
+  } catch {
+    return crypto.randomUUID(); // storage blocked (private mode etc.) — fresh id per page load
+  }
+}
+const sessionId = getSessionId();
+
 // Ask a question: POST /api/query, render the answer as a new AI chat bubble.
 async function askQuestion(question) {
   if (questionInFlight) return;
@@ -200,7 +217,7 @@ async function askQuestion(question) {
     const result = await fetchJSON('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, session_id: sessionId }),
     });
     placeholder.querySelector('p').textContent = result.answer ?? 'No answer returned.';
     if (result.operation === 'error') placeholder.classList.add('error');

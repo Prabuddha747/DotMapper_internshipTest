@@ -104,3 +104,71 @@ def test_stats_endpoint_shape():
     assert body["total_tickets"] == 500
     assert body["by_status"]["Resolved"] == 327
     assert body["anomaly_count"] == 80 + 21
+
+
+def test_stats_endpoint_reports_data_quality():
+    # this CSV is clean, so 0 data-quality hits -> 100% score, matching the
+    # "clean on real data" finding in tests/test_anomalies.py.
+    with TestClient(app) as client:
+        response = client.get("/api/stats")
+    body = response.json()
+    assert body["data_quality_score"] == 100.0
+    assert body["data_quality_warnings"] == []
+
+
+def test_query_clarify_intent_returns_the_question_not_a_guess():
+    with TestClient(app) as client:
+        with patch("app.main.llm.extract_intent", return_value={"operation": "clarify", "question": "Which do you mean?"}):
+            response = client.post("/api/query", json={"question": "not resolved within 12 hours"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["operation"] == "clarify"
+    assert body["answer"] == "Which do you mean?"
+
+
+def test_query_sessions_do_not_leak_followup_context():
+    # session A asks about Technical tickets, session B never mentions Technical
+    # at all — B's follow-up must not see A's previous filters.
+    seen_previous = []
+
+    def fake_extract_intent(question, previous=None):
+        seen_previous.append(previous)
+        return {"operation": "count", "filters": {}}
+
+    with TestClient(app) as client:
+        with patch("app.main.llm.extract_intent", side_effect=fake_extract_intent):
+            client.post("/api/query", json={"question": "Technical tickets?", "session_id": "session-a"})
+            client.post("/api/query", json={"question": "and by agent?", "session_id": "session-b"})
+
+    assert seen_previous[0] is None  # session-a's first call has no history
+    assert seen_previous[1] is None  # session-b is a distinct session, must not inherit session-a's context
+
+
+def test_query_followup_inherits_same_session_previous_intent():
+    responses = [
+        {"operation": "average", "field": "customer_rating", "filters": {"category": "Technical"}},
+        {"operation": "group_count", "group_by": "agent_id", "filters": {}},
+    ]
+
+    with TestClient(app) as client:
+        with patch("app.main.llm.extract_intent", side_effect=responses) as mock_extract:
+            first = client.post("/api/query", json={"question": "avg rating for Technical?", "session_id": "same-session"})
+            client.post("/api/query", json={"question": "and by agent?", "session_id": "same-session"})
+
+    assert first.status_code == 200
+    second_call_previous = mock_extract.call_args_list[1].kwargs["previous"]
+    assert second_call_previous["intent"]["filters"] == {"category": "Technical"}
+
+
+def test_query_clarify_does_not_update_session_state():
+    def fake_extract_intent(question, previous=None):
+        if question == "ambiguous":
+            return {"operation": "clarify", "question": "which do you mean?"}
+        return {"operation": "count", "filters": {}, "_previous_seen": previous}
+
+    with TestClient(app) as client:
+        with patch("app.main.llm.extract_intent", side_effect=fake_extract_intent) as mock_extract:
+            client.post("/api/query", json={"question": "ambiguous", "session_id": "clarify-session"})
+            client.post("/api/query", json={"question": "next", "session_id": "clarify-session"})
+    second_call_previous = mock_extract.call_args_list[1].kwargs["previous"]
+    assert second_call_previous is None  # the clarify turn left no intent behind to inherit

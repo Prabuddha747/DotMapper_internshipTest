@@ -15,7 +15,7 @@ from app.anomaly import ENUM_VALUES
 from app.ingestion import REQUIRED_COLUMNS
 from app.query_engine import NUMERIC_FIELDS
 
-OPERATIONS = ["count", "filter", "group_count", "average", "sum", "min", "max", "anomaly_summary", "equalize", "ratio", "search", "correlation"]
+OPERATIONS = ["count", "filter", "group_count", "average", "sum", "min", "max", "anomaly_summary", "equalize", "ratio", "search", "correlation", "clarify"]
 GROUPABLE_COLUMNS = ["agent_id", "category", "priority", "status"]
 
 
@@ -43,6 +43,7 @@ def _build_system_prompt() -> str:
         '(substring match on issue_summary, e.g. "tickets mentioning login failure")\n'
         '{"operation": "correlation", "field": "<numeric field A>", "field_b": "<numeric field B>", "filters": {...}} '
         '(e.g. "is a lower rating associated with a longer resolution time?")\n'
+        '{"operation": "clarify", "question": "<a short question offering the specific readings>"}\n'
         '{"operation": "error", "reason": "<why this question can\'t be answered>"}\n\n'
         'For plain group_count (counting tickets per category, no "field"), the '
         'response also reports each category\'s percentage share of the total — '
@@ -56,8 +57,16 @@ def _build_system_prompt() -> str:
         "Omit filters that don't apply. Use the exact column names and enum "
         "casing given above. A resolution_time_hrs/customer_rating comparison "
         "only matches already-resolved tickets (those fields are null until "
-        "resolved) — say so in your answer if the question is about unresolved "
-        "tickets aging past a threshold; prefer \"anomaly_summary\" for that case. "
+        "resolved). A question phrased as \"not resolved within N hours\" or "
+        "\"unresolved past N hours\" is genuinely ambiguous — it could mean "
+        "EITHER tickets still open/escalated past N hours (an age check), OR "
+        "tickets that took longer than N hours to actually resolve (a "
+        "resolution_time_hrs comparison, matching only already-resolved "
+        "tickets). Do not silently pick one reading. For this specific "
+        "ambiguity, respond with {\"operation\": \"clarify\", \"question\": "
+        "\"Do you mean tickets still unresolved after N hours, or tickets "
+        "that were resolved after taking more than N hours?\"} (substitute "
+        "the real N) instead of guessing.\n\n"
         "If the question asks for the sum/average of TWO numeric fields together "
         "with their ratio (e.g. \"total response time and resolution time, and "
         "their ratio\"), use \"ratio\" with both fields — do not respond with the "
@@ -148,6 +157,11 @@ def _validate_intent(raw: dict) -> dict:
 
     if operation == "anomaly_summary":
         return {"operation": "anomaly_summary"}
+
+    if operation == "clarify":
+        question = raw.get("question")
+        question = question if isinstance(question, str) and question.strip() else "Could you clarify what you mean?"
+        return {"operation": "clarify", "question": question}
 
     filters, dropped = _validate_filters(raw.get("filters"))
     intent = {"operation": operation, "filters": filters}

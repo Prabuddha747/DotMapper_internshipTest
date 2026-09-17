@@ -25,6 +25,23 @@ def test_resolution_outlier_matches_verified_count():
     assert len(hits) == 21
 
 
+def test_overdue_unresolved_explains_the_deviation():
+    # auditability: a flagged ticket must say *why* — the threshold and how
+    # far over it, not just the raw age.
+    hits = [h for h in detect_anomalies(_df()) if h["rule"] == "overdue_unresolved"]
+    for h in hits:
+        assert h["threshold_hours"] == 24
+        assert h["over_by_hours"] == round(h["age_hours"] - 24, 1)
+        assert h["over_by_hours"] > 0
+
+
+def test_resolution_outlier_explains_the_deviation():
+    hits = [h for h in detect_anomalies(_df()) if h["rule"] == "resolution_outlier"]
+    for h in hits:
+        assert h["deviation_hrs"] == round(h["resolution_time_hrs"] - h["threshold_hrs"], 1)
+        assert h["deviation_hrs"] > 0
+
+
 def test_data_quality_clean_on_real_data():
     # the provided CSV has no missing/invalid values outside the expected
     # null pattern, so this rule should find nothing here (it's still

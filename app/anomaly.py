@@ -31,6 +31,8 @@ def _rule_overdue_unresolved(df: pd.DataFrame) -> list[dict]:
             "priority": row.priority,
             "status": row.status,
             "age_hours": round(age_hours[idx], 1),
+            "threshold_hours": 24,
+            "over_by_hours": round(age_hours[idx] - 24, 1),
         }
         for idx, row in hits.iterrows()
     ]
@@ -55,6 +57,7 @@ def _rule_resolution_outlier(df: pd.DataFrame) -> list[dict]:
             "ticket_id": row.ticket_id,
             "resolution_time_hrs": row.resolution_time_hrs,
             "threshold_hrs": round(upper, 1),
+            "deviation_hrs": round(row.resolution_time_hrs - upper, 1),
         }
         for _, row in hits.iterrows()
     ]

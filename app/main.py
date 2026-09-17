@@ -25,7 +25,7 @@ qe.OPERATIONS["anomaly_summary"] = anomaly.summary
 async def lifespan(app: FastAPI):
     """Load the CSV once into memory; app.state.df is the store for the process lifetime."""
     app.state.df = load_tickets(DATA_PATH)
-    app.state.last_intent = None  # ponytail: single global slot, not per-client — fine for a local single-evaluator app; key by a client id if concurrent multi-user follow-ups are ever needed
+    app.state.sessions = {}  # ponytail: plain dict, never evicted — fine for a local single-evaluator app (one browser tab per session_id); add a TTL/eviction if this ever runs long enough to accumulate many distinct sessions
     yield
 
 
@@ -52,11 +52,17 @@ def api_query(request: QueryRequest) -> dict:
     the answer text came from a real pandas computation, not the model.
     """
     base = {"question": request.question, "source": DATA_SOURCE, "timestamp": datetime.now(timezone.utc).isoformat()}
-    intent = llm.extract_intent(request.question, previous=app.state.last_intent)
+    session_id = request.session_id or "anon"
+    previous = app.state.sessions.get(session_id)
+    intent = llm.extract_intent(request.question, previous=previous)
     operation = intent.pop("operation")
 
     if operation == "error":
         return {**base, "operation": "error", "answer": f"Couldn't process that question: {intent.get('reason')}"}
+
+    if operation == "clarify":
+        # Not a resolved intent — nothing to inherit from, so don't update the session.
+        return {**base, "operation": "clarify", "answer": intent["question"]}
 
     try:
         result = qe.run(app.state.df, operation, **intent)
@@ -65,7 +71,7 @@ def api_query(request: QueryRequest) -> dict:
         # an unexpected data-shape issue into a raw 500.
         return {**base, "operation": "error", "answer": f"Couldn't compute that: {exc}"}
 
-    app.state.last_intent = {"question": request.question, "intent": {"operation": operation, **intent}}
+    app.state.sessions[session_id] = {"question": request.question, "intent": {"operation": operation, **intent}}
     return {**base, "operation": operation, **intent, **result}
 
 
@@ -79,11 +85,15 @@ def api_anomalies() -> dict:
 def api_stats() -> dict:
     """Dashboard summary for the UI's header cards."""
     df = app.state.df
+    hits = anomaly.detect_anomalies(df)
+    quality_hits = [h for h in hits if h["rule"] == "data_quality"]
     return {
         "total_tickets": len(df),
         "by_status": {k: int(v) for k, v in df["status"].value_counts().items()},
         "by_priority": {k: int(v) for k, v in df["priority"].value_counts().items()},
-        "anomaly_count": len(anomaly.detect_anomalies(df)),
+        "anomaly_count": len(hits),
+        "data_quality_score": round((1 - len(quality_hits) / len(df)) * 100, 1) if len(df) else 100.0,
+        "data_quality_warnings": [h["issue"] for h in quality_hits],
     }
 
 

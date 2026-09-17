@@ -91,6 +91,22 @@ def test_correlation_invalid_field_becomes_error():
     assert intent["operation"] == "error"
 
 
+def test_valid_clarify_intent_passes_through():
+    with _mock_groq_returning(
+        '{"operation": "clarify", "question": "Do you mean still unresolved after 12 hours, or resolved after taking more than 12 hours?"}'
+    ):
+        intent = llm.extract_intent("Show tickets not resolved within 12 hours")
+    assert intent["operation"] == "clarify"
+    assert "12 hours" in intent["question"]
+
+
+def test_clarify_missing_question_gets_a_fallback():
+    with _mock_groq_returning('{"operation": "clarify"}'):
+        intent = llm.extract_intent("ambiguous question")
+    assert intent["operation"] == "clarify"
+    assert intent["question"]  # non-empty fallback, never blank
+
+
 def test_extract_intent_without_previous_sends_no_history():
     with _mock_groq_returning('{"operation": "count", "filters": {}}') as mock_groq:
         llm.extract_intent("How many tickets?")
@@ -371,6 +387,15 @@ def test_live_followup_question_inherits_previous_filters():
     assert followup["operation"] == "group_count"
     assert followup["filters"].get("category") == "Technical"
     assert followup["field"] == "customer_rating"
+
+
+@pytest.mark.live
+def test_live_ambiguous_sla_question_asks_for_clarification():
+    # The exact README example question — genuinely ambiguous between "still
+    # unresolved past 12h" and "took over 12h to resolve." Must ask, not guess.
+    intent = llm.extract_intent("Show me all Critical tickets not resolved within 12 hours.")
+    assert intent["operation"] == "clarify"
+    assert "12" in intent["question"]
 
 
 @pytest.mark.live

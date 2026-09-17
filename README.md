@@ -68,10 +68,17 @@ none of the operations need a persistence layer beyond the source CSV.
   numeric-comparison (`>`, `>=`, `<`, `<=`) filters.
 - **Follow-up questions** — a short follow-up ("...and by agent?", "what
   about Critical?") inherits the previous question's filters/fields
-  instead of needing to be fully self-contained.
+  instead of needing to be fully self-contained. Kept per browser session
+  (a client-generated id), so two people asking the app questions at the
+  same time never inherit each other's context.
+- **Clarification instead of guessing** — for a question with a genuine
+  either/or ambiguity (e.g. "not resolved within 12 hours" — still open
+  past 12h, or took over 12h to resolve?), the system asks which reading
+  you meant instead of silently picking one.
 - **Anomaly detection** — three independent, explainable rules (overdue
   unresolved tickets, statistical resolution-time outliers, data-quality
-  violations).
+  violations), each flagged ticket reporting *why* — the threshold and how
+  far over it, not just a flag.
 - **REST API and UI** — both expose the same functionality; the UI is a
   thin client over the same endpoints.
 - **Evidence envelope** — every `/api/query` response includes the data
@@ -220,6 +227,11 @@ Q2: "...and by agent?"
 → "Top agent_id by average customer_rating (desc): AGT-04 (4.67)."
 ```
 
+**"Show me all Critical tickets not resolved within 12 hours."** (genuinely ambiguous)
+```
+{"operation": "clarify", "question": "Do you mean tickets still unresolved after 12 hours, or tickets that were resolved after taking more than 12 hours?"}
+```
+
 ## 7. Edge cases handled
 
 These were found and fixed by adversarially testing the running system
@@ -241,6 +253,8 @@ with real, messy phrasing — not just the documented sample queries.
 | Groq request fails, times out, or returns malformed JSON | Every failure mode degrades to a clean JSON error; `extract_intent()` never raises. |
 | Groq's JSON-mode validator rejects a generation (e.g. the model tried to explain a limitation in prose) | Generic, accurate error message — never claims the question is off-topic, since this also fires for on-topic compound questions the model can't express in one operation. |
 | "Which ticket has the highest/lowest X" | `min`/`max` identify the actual `ticket_id` that produced the value, not just the bare number. |
+| A question with a genuine either/or reading (e.g. "not resolved within 12 hours" — still open past 12h, or took over 12h to resolve?) | The system asks which reading you meant (`clarify` operation) instead of silently picking one and answering with the wrong half. |
+| Two people (or two browser tabs) asking follow-up questions at the same time | Follow-up context is kept per client-generated `session_id`, not globally — one session's filters never leak into another's follow-up. |
 | `GROQ_API_KEY` not configured | `/api/query` reports the missing key cleanly; `/health`, `/api/anomalies`, `/api/stats` remain fully usable. |
 | Response values containing NaN / pandas Timestamps / numpy scalars | Converted to JSON-safe types before serialization (`None`, ISO strings, native `int`/`float`) — this is verified by dedicated tests, not just assumed. |
 
@@ -251,10 +265,13 @@ clock — the data is historical, so a live clock would flag every ticket as
 ancient.
 
 - **Rule A — overdue unresolved**: status in (Open, Escalated) AND priority
-  in (High, Critical) AND age past creation > 24h.
+  in (High, Critical) AND age past creation > 24h. Each hit reports
+  `over_by_hours` — how far past the 24h threshold, not just the flag.
 - **Rule B — resolution-time outlier**: for resolved tickets, flag
   `resolution_time_hrs > Q3 + 1.5 × IQR` (skipped if fewer than 4 resolved
-  tickets exist, since quartiles are meaningless below that).
+  tickets exist, since quartiles are meaningless below that). Each hit
+  reports `deviation_hrs` — e.g. ticket TKT-108 resolved in 119.7h against
+  a 48.1h threshold, 71.6h over — auditable, not just a bare flag.
 - **Rule C — data quality**: resolved tickets missing required fields, or
   rows with an invalid category/priority/status value — kept for
   robustness against a dirtier dataset even though this CSV is clean.
@@ -276,18 +293,26 @@ ancient.
   and surfaced with an actionable message; the UI also disables the Ask
   button while a request is in flight to avoid burning quota on rapid
   re-clicks.
+- **Ask instead of guess, for the one known ambiguity.** Rather than
+  picking an interpretation for "not resolved within N hours"-style
+  phrasing, the system returns a `clarify` response naming both readings.
+  Scoped to this one documented case, not a general ambiguity detector.
+- **Prompt injection has limited blast radius by construction, not by a
+  dedicated filter.** The LLM's only output is a whitelisted-operation JSON
+  object, validated field-by-field (`_validate_intent`) before anything
+  runs; it's never executed as code or SQL. A question that tries to
+  inject instructions can at worst pick a wrong (still validated)
+  operation — it can't escape into arbitrary computation.
 
 ## 10. Known limitations
 
 - "This week" / "today" resolve against the dataset's latest timestamp,
   not the real-world date — the data itself is historical.
-- SLA-style phrasing like "not resolved within N hours" has two valid
-  readings (resolved late, vs. still open past the threshold); the model
-  picks one interpretation per call rather than returning both.
 - No persistence across restarts — the CSV is the single source of truth,
   intentionally re-loaded on every boot.
-- No authentication, multi-tenancy, or containerization — out of scope for
-  a local, single-evaluator system.
+- No authentication or multi-tenancy — out of scope for a local,
+  single-evaluator system. Follow-up context is now session-keyed (§3),
+  but that's isolation between browser tabs, not real access control.
 - Groq free-tier model availability differs by account; if the default
   model isn't enabled on a given key, set `GROQ_MODEL` to one that is.
 - The underlying model is not perfectly deterministic even at
@@ -296,19 +321,57 @@ ancient.
 
 ## 11. What could be improved with more time
 
-- Parse an explicit N-hour threshold out of the question text for
+- **Parse an explicit N-hour threshold out of the question text** for
   SLA-style queries, instead of relying on a fixed 24-hour anomaly rule or
   a single manually-specified comparison filter.
-- Expand `equalize`-style closed-form operations to other useful
-  what-if-shaped-but-actually-deterministic questions, if real usage shows
-  more of them.
-- The follow-up context (§3) is a single global "last question" slot, not
-  actually keyed per client/session — correct for a local, single-
-  evaluator run, wrong the moment two people query concurrently. Key it by
-  a client-supplied id if that ever matters.
-- A real production deployment (behind a reverse proxy, with the Docker
-  image pushed to a registry and run with restart policies) rather than
-  the local `docker compose up` this repo ships.
+- **Multi-step query planner.** Right now the LLM produces exactly one
+  operation. A question like "among unresolved tickets, what percentage
+  belongs to each priority, *and* which priority has the highest average
+  response time" needs two calls today (`group_count` covers the first
+  half, `group_count` with a `field` covers the second) — a validated,
+  Python-executed chain of steps (filter → group → aggregate) would answer
+  it in one turn. Real architecture change, not a quick add.
+- **A semantic business-term layer was considered and skipped, not
+  deferred.** The LLM's schema-aware system prompt (real enum values +
+  column list injected) already resolves "unresolved," "urgent," etc.
+  correctly in live testing. A hardcoded synonym table would duplicate
+  behavior that already works and need constant upkeep as phrasing varies
+  — add it only if live testing ever finds a business term the model
+  actually gets wrong.
+- **A real evaluation harness** — a labeled dataset of (question, expected
+  operation, expected filters, expected answer) pairs, scored for intent
+  accuracy, filter accuracy, numeric correctness, and unsupported-claim
+  rate — to compare prompts/models scientifically instead of judging by
+  hand. Disproportionate to a 48-hour single-evaluator assessment, but the
+  right investment before trusting a bigger dataset or a different model.
+- **Confidence-based routing** (execute / clarify / reject by confidence
+  band) is *not* on this list as a "just add it" item — a small
+  open-weight model's self-reported confidence isn't trustworthy on its
+  own, so this would need its own independent validation layer to be
+  worth building at all.
+- **Result caching** was considered and rejected for now, not just
+  unbuilt: caching by question text becomes unsafe once follow-up context
+  (§3) makes identical text mean different things depending on what came
+  before it — a naive cache risks silently serving a stale or wrong
+  answer. Worth solving properly if real rate-limit pressure ever justifies it.
+- **Time-aware analytics** (week-over-week, business-hours, rolling
+  averages) — the dataset is static historical (Jan–Mar 2024) with no real
+  "today," so there's nothing to exercise this against yet.
+- **Full production observability** (structured logs, request IDs,
+  token/latency metrics) — the evidence envelope on every `/api/query`
+  response (`source`/`timestamp`/`rows_used`) is a lightweight version of
+  this already, sized for local single-evaluator use; full APM belongs to
+  an actual production deployment.
+- **A human feedback loop** (thumbs up/down, correction capture) would
+  need new persistence infra this app deliberately doesn't have — §9 cut
+  the database entirely for this data size, and feedback storage would be
+  the one thing that brings it back.
+- **Multi-dataset / DB scaling** (SQLite for small, Postgres for
+  concurrent multi-user, DuckDB for larger analytical loads) — the scaling
+  path if the dataset ever stops being ~500 rows, not a current gap; see §9.
+- **Production deployment** behind a reverse proxy, with the Docker image
+  pushed to a registry and run with restart policies/auth, rather than the
+  local `docker compose up` this repo ships.
 
 ## 12. Testing
 
@@ -318,19 +381,22 @@ pytest -m live                            # + real Groq smoke tests (needs GROQ_
 pytest --cov=app --cov-report=term-missing
 ```
 
-132 tests total (123 mocked + 9 live), 100% statement coverage on `app/`:
+142 tests total (132 mocked + 10 live), 100% statement coverage on `app/`:
 ingestion/schema validation, every query operation (including comparison
 filters, JSON-serialization safety, and the `ratio`/`equalize`/`search`/
 `correlation` operations and `group_count`'s field-ranking mode), all
-anomaly rules including boundary and degenerate cases, LLM intent
-validation against a mocked Groq client (malformed JSON, rate limits,
-case-insensitive enums, dropped filters, missing key, follow-up context
-correctly included/excluded from the message history), and FastAPI
-endpoint behavior including graceful degradation and evidence-envelope
-checks. The live tests hit the real Groq API to catch semantic failures a
-mock can't: off-topic questions, hypothetical/what-if questions, the
-compound sum-and-ratio question, a follow-up question correctly inheriting
-filters, and known-answer questions verified against the real dataset.
+anomaly rules including boundary, degenerate, and the new explanation-field
+cases, LLM intent validation against a mocked Groq client (malformed JSON,
+rate limits, case-insensitive enums, dropped filters, missing key,
+follow-up context correctly included/excluded from the message history,
+`clarify` pass-through), and FastAPI endpoint behavior including graceful
+degradation, evidence-envelope checks, per-session follow-up isolation,
+and data-quality reporting. The live tests hit the real Groq API to catch
+semantic failures a mock can't: off-topic questions, hypothetical/what-if
+questions, the compound sum-and-ratio question, a follow-up question
+correctly inheriting filters, the genuinely-ambiguous SLA question
+correctly asking for clarification, and known-answer questions verified
+against the real dataset.
 The Docker image and `docker compose up` path were built and verified by
 actually running the container end-to-end (`/health`, `/api/query`), not
 just written and assumed to work.

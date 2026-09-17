@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 
 class QueryRequest(BaseModel):
     question: str
+    session_id: str | None = None  # client-generated opaque id, used only to key follow-up context (app.state.sessions)
 
     @field_validator("question")
     @classmethod

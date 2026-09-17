@@ -123,6 +123,29 @@ def maximum(df: pd.DataFrame, field: str | None = None, filters: dict | None = N
     return _pack(f"Maximum {field}: {result}.", {"max": result, "matched": len(values)}, unmatched, rows_used=len(values))
 
 
+def ratio(df: pd.DataFrame, field: str | None = None, field_b: str | None = None,
+          agg: str = "sum", filters: dict | None = None, **_) -> dict:
+    """Sum or average of two numeric fields, and their ratio. Pure arithmetic
+    on real columns — same safety class as sum()/average(), not a derived
+    metric that needs its own hallucination review."""
+    _validate_numeric_field(field)
+    _validate_numeric_field(field_b)
+    agg = agg if agg in ("sum", "average") else "sum"
+    filtered, unmatched = _apply_filters(df, filters)
+    a, b = filtered[field].dropna(), filtered[field_b].dropna()
+    value_a = round((a.sum() if agg == "sum" else a.mean()), 2) if not a.empty else 0
+    value_b = round((b.sum() if agg == "sum" else b.mean()), 2) if not b.empty else 0
+
+    data = {"agg": agg, "field": field, "value_a": value_a, "field_b": field_b, "value_b": value_b}
+    if value_b == 0:
+        answer = f"{agg} of {field} is {value_a}; {agg} of {field_b} is 0, so the ratio is undefined."
+        data["ratio"] = None
+    else:
+        data["ratio"] = round(value_a / value_b, 4)
+        answer = f"{agg} of {field}: {value_a}; {agg} of {field_b}: {value_b}; ratio {field}/{field_b} = {data['ratio']}."
+    return _pack(answer, data, unmatched, rows_used=len(filtered))
+
+
 def equalize(df: pd.DataFrame, group_by: str | None = None, filters: dict | None = None, **_) -> dict:
     """Minimum tickets that must move between group_by's categories so each
     holds an equal share of the real current data. Pure arithmetic on real
@@ -169,6 +192,7 @@ OPERATIONS = {
     "sum": total,
     "min": minimum,
     "max": maximum,
+    "ratio": ratio,
     "equalize": equalize,
 }
 

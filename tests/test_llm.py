@@ -70,6 +70,23 @@ def test_valid_equalize_intent_passes_through():
     assert intent == {"operation": "equalize", "filters": {}, "group_by": "status"}
 
 
+def test_valid_ratio_intent_passes_through():
+    with _mock_groq_returning(
+        '{"operation": "ratio", "field": "response_time_hrs", "field_b": "resolution_time_hrs", "agg": "sum"}'
+    ):
+        intent = llm.extract_intent("Total response and resolution time, and their ratio?")
+    assert intent == {
+        "operation": "ratio", "filters": {},
+        "field": "response_time_hrs", "field_b": "resolution_time_hrs", "agg": "sum",
+    }
+
+
+def test_ratio_invalid_field_becomes_error():
+    with _mock_groq_returning('{"operation": "ratio", "field": "response_time_hrs", "field_b": "agent_id"}'):
+        intent = llm.extract_intent("Ratio of response time to agent id?")
+    assert intent["operation"] == "error"
+
+
 def test_equalize_invalid_group_by_becomes_error():
     with _mock_groq_returning('{"operation": "equalize", "group_by": "issue_summary"}'):
         intent = llm.extract_intent("Balance issue_summary?")
@@ -166,7 +183,20 @@ def test_bad_request_error_gets_a_clean_message_not_a_raw_dump():
         intent = llm.extract_intent("who are you?")
     assert intent["operation"] == "error"
     assert "json_validate_failed" not in intent["reason"]
-    assert "support ticket" in intent["reason"].lower()
+
+
+def test_bad_request_error_message_does_not_claim_off_topic():
+    # Live-found bug: this exception also fires for on-topic but unsupported
+    # compound questions ("sum of X and Y, and their ratio") — the message
+    # must not tell the user their question isn't about the dataset when it
+    # might well be.
+    response = httpx.Response(400, request=httpx.Request("POST", "https://api.groq.com/x"))
+    bad_request_error = BadRequestError("json_validate_failed", response=response, body=None)
+    with patch("app.llm.Groq", side_effect=bad_request_error):
+        intent = llm.extract_intent("sum of response_time_hrs and resolution_time_hrs, and their ratio")
+    assert intent["operation"] == "error"
+    assert "only answers questions about" not in intent["reason"]
+    assert "not about the ticket dataset" not in intent["reason"]
 
 
 def test_groq_exception_becomes_error_not_crash():
@@ -235,6 +265,17 @@ def test_live_swap_and_equalize_question_uses_equalize_not_error():
     intent = llm.extract_intent(question)
     assert intent["operation"] == "equalize"
     assert intent["group_by"] == "status"
+
+
+@pytest.mark.live
+def test_live_sum_and_ratio_question_uses_ratio_not_error():
+    # Reproduces the exact user-asked question: a compound "sum of X and Y,
+    # and their ratio" is on-topic, deterministic arithmetic on two real
+    # columns — must route to "ratio", not the generic can't-process error.
+    question = "what is the total sum of response time hrs and resolution time hrs and also give there ratio"
+    intent = llm.extract_intent(question)
+    assert intent["operation"] == "ratio"
+    assert {intent["field"], intent["field_b"]} == {"response_time_hrs", "resolution_time_hrs"}
 
 
 @pytest.mark.live

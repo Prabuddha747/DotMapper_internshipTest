@@ -220,3 +220,50 @@ def test_equalize_values_are_json_serializable(df):
 def test_run_dispatches_to_equalize(df):
     result = qe.run(df, "equalize", group_by="status")
     assert result["data"]["total_moved"] == 160.33
+
+
+# --- ratio: sum/average of two numeric fields plus their ratio ---
+
+def test_ratio_sum_ground_truth(df):
+    result = qe.ratio(df, field="response_time_hrs", field_b="resolution_time_hrs", agg="sum")
+    assert result["data"]["value_a"] == 1310.3
+    assert result["data"]["value_b"] == 6264.8
+    assert result["data"]["ratio"] == 0.2092
+
+
+def test_ratio_average(df):
+    result = qe.ratio(df, field="response_time_hrs", field_b="resolution_time_hrs", agg="average")
+    assert result["data"]["value_a"] == round(1310.3 / 500, 2)
+    assert result["data"]["value_b"] == round(6264.8 / 327, 2)
+
+
+def test_ratio_defaults_to_sum_for_unknown_agg(df):
+    result = qe.ratio(df, field="response_time_hrs", field_b="resolution_time_hrs", agg="bogus")
+    assert result["data"]["agg"] == "sum"
+    assert result["data"]["value_a"] == 1310.3
+
+
+def test_ratio_respects_filters(df):
+    result = qe.ratio(df, field="response_time_hrs", field_b="resolution_time_hrs", filters={"status": "Resolved"})
+    assert result["rows_used"] == 327
+
+
+def test_ratio_non_numeric_field_rejected(df):
+    with pytest.raises(ValueError, match="not numeric"):
+        qe.ratio(df, field="agent_id", field_b="response_time_hrs")
+
+
+def test_ratio_zero_denominator_is_undefined_not_a_crash(df):
+    result = qe.ratio(df, field="response_time_hrs", field_b="customer_rating", filters={"priority": "Nonexistent"})
+    assert result["data"]["ratio"] is None
+    assert "undefined" in result["answer"]
+
+
+def test_ratio_values_are_json_serializable(df):
+    result = qe.ratio(df, field="response_time_hrs", field_b="resolution_time_hrs")
+    json.dumps(result)
+
+
+def test_run_dispatches_to_ratio(df):
+    result = qe.run(df, "ratio", field="response_time_hrs", field_b="resolution_time_hrs")
+    assert result["data"]["ratio"] == 0.2092

@@ -15,7 +15,7 @@ from app.anomaly import ENUM_VALUES
 from app.ingestion import REQUIRED_COLUMNS
 from app.query_engine import NUMERIC_FIELDS
 
-OPERATIONS = ["count", "filter", "group_count", "average", "sum", "min", "max", "anomaly_summary", "equalize"]
+OPERATIONS = ["count", "filter", "group_count", "average", "sum", "min", "max", "anomaly_summary", "equalize", "ratio"]
 GROUPABLE_COLUMNS = ["agent_id", "category", "priority", "status"]
 
 
@@ -36,6 +36,7 @@ def _build_system_prompt() -> str:
         '{"operation": "average"|"sum"|"min"|"max", "field": "<numeric field>", "filters": {...}}\n'
         '{"operation": "anomaly_summary"}\n'
         '{"operation": "equalize", "group_by": "<column>"}\n'
+        '{"operation": "ratio", "field": "<numeric field A>", "field_b": "<numeric field B>", "agg": "sum"|"average", "filters": {...}}\n'
         '{"operation": "error", "reason": "<why this question can\'t be answered>"}\n\n'
         '"filters" maps column -> value, column -> [values] (isin), or for a '
         'numeric field column -> {"gt"|"gte"|"lt"|"lte": number} (e.g. '
@@ -44,7 +45,11 @@ def _build_system_prompt() -> str:
         "casing given above. A resolution_time_hrs/customer_rating comparison "
         "only matches already-resolved tickets (those fields are null until "
         "resolved) — say so in your answer if the question is about unresolved "
-        "tickets aging past a threshold; prefer \"anomaly_summary\" for that case.\n\n"
+        "tickets aging past a threshold; prefer \"anomaly_summary\" for that case. "
+        "If the question asks for the sum/average of TWO numeric fields together "
+        "with their ratio (e.g. \"total response time and resolution time, and "
+        "their ratio\"), use \"ratio\" with both fields — do not respond with the "
+        "error form just because it's two numbers instead of one.\n\n"
         "If the question is not about this ticket dataset (small talk, asking who "
         "you are, anything unrelated to tickets/agents/priority/status/ratings/"
         "resolution time), you MUST still respond with the JSON error form above — "
@@ -141,6 +146,14 @@ def _validate_intent(raw: dict) -> dict:
             return {"operation": "error", "reason": f"invalid field from LLM: {field!r}"}
         intent["field"] = field
 
+    if operation == "ratio":
+        field, field_b = raw.get("field"), raw.get("field_b")
+        if field not in NUMERIC_FIELDS or field_b not in NUMERIC_FIELDS:
+            return {"operation": "error", "reason": f"invalid field(s) for ratio from LLM: {field!r}, {field_b!r}"}
+        intent["field"] = field
+        intent["field_b"] = field_b
+        intent["agg"] = raw.get("agg") if raw.get("agg") in ("sum", "average") else "sum"
+
     if operation == "filter":
         intent["limit"] = raw.get("limit") if isinstance(raw.get("limit"), int) else 50
 
@@ -171,11 +184,13 @@ def extract_intent(question: str) -> dict:
         # Distinguished from a generic failure: this one is worth telling the user to retry.
         return {"operation": "error", "reason": "Groq free-tier rate limit hit — wait a moment and try again"}
     except BadRequestError:
-        # Groq's own JSON-mode validator rejected the generation (e.g. the model
-        # tried to answer an off-topic question in prose instead of JSON). The
-        # system prompt now tells it to emit a JSON error instead — this is the
-        # defensive fallback for when that steering still doesn't hold.
-        return {"operation": "error", "reason": "This system only answers questions about the support ticket dataset."}
+        # Groq's own JSON-mode validator rejected the generation. Not just an
+        # off-topic-question thing: live-found this also fires for on-topic
+        # but unsupported compound questions (e.g. "sum of X and Y, and their
+        # ratio") where the model breaks strict JSON trying to explain the
+        # limitation in prose. Message must stay generic — it must not claim
+        # the question is off-topic when it might not be.
+        return {"operation": "error", "reason": "Couldn't process that question as a single operation — try asking for one thing at a time."}
     except Exception as exc:  # noqa: BLE001 - any other Groq/network failure must degrade gracefully, not crash the API
         return {"operation": "error", "reason": f"Groq request failed: {exc}"}
 

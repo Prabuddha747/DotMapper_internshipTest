@@ -31,7 +31,7 @@ support_tickets.csv → ingestion.py → in-memory pandas DataFrame (app.state)
                        ┌────────────────────┼────────────────────┐
                        ▼                                          ▼
                  query_engine.py                            anomaly.py
-        (count/filter/group/avg/sum/min/max/equalize)       (IQR + rules)
+      (count/filter/group/avg/sum/min/max/ratio/equalize)   (IQR + rules)
                        ▲
                        │ structured intent (JSON)
                     llm.py ── Groq API
@@ -59,8 +59,9 @@ none of the operations need a persistence layer beyond the source CSV.
 - **Ingestion** — loads the CSV once at startup into a validated in-memory
   DataFrame (schema and column-type checks fail fast, with a clear error).
 - **Natural-language querying** — count, filter, group-by, average, sum,
-  min, max, and **equalize** (see §6), each with optional equality,
-  multi-value, and numeric-comparison (`>`, `>=`, `<`, `<=`) filters.
+  min, max, **ratio** (sum/average of two fields plus their ratio), and
+  **equalize** (see §6), each with optional equality, multi-value, and
+  numeric-comparison (`>`, `>=`, `<`, `<=`) filters.
 - **Anomaly detection** — three independent, explainable rules (overdue
   unresolved tickets, statistical resolution-time outliers, data-quality
   violations).
@@ -166,6 +167,11 @@ statuses to make Open, Escalated, and Resolved equal?"**
 {"operation": "equalize", "group_by": "status"} → "To make status categories equal (166.7 each of 500), 160.33 ticket(s) must move: Resolved gives away 160.33 (49.0%), Open receives 55.67, Escalated receives 104.67"
 ```
 
+**"What is the total sum of response time and resolution time, and their ratio?"**
+```
+{"operation": "ratio", "field": "response_time_hrs", "field_b": "resolution_time_hrs", "agg": "sum"} → "sum of response_time_hrs: 1310.3; sum of resolution_time_hrs: 6264.8; ratio response_time_hrs/resolution_time_hrs = 0.2092."
+```
+
 ## 7. Edge cases handled
 
 These were found and fixed by adversarially testing the running system
@@ -176,6 +182,7 @@ with real, messy phrasing — not just the documented sample queries.
 | Off-topic question ("who are you?") | Returns a clean JSON error instead of leaking a raw LLM/API error to the caller. |
 | Hypothetical / "what-if" question that expects a *new, simulated* distribution (e.g. "if tickets rotated between statuses, what would the new percentages be?") | Returns an honest "can't simulate hypothetical changes" error instead of silently answering with the real, unrelated current data. |
 | A "what-if" that is actually well-defined arithmetic on real data (e.g. "what's the minimum % of tickets that must move to make each status equal?") | Answered correctly via the `equalize` operation — swapping which label owns a count doesn't change the arithmetic needed to equalize it, so this is not a simulation and is safe to compute. |
+| Compound question needing two fields at once (e.g. "sum of response time and resolution time, and their ratio") | Answered via a dedicated `ratio` operation instead of being wrongly rejected as unsupported — sum/ratio of two real columns is ordinary arithmetic, no different in kind from a single-field `sum`. |
 | Model returns inconsistent enum casing (`"critical"` instead of `"Critical"`) | Filter validation matches case-insensitively and substitutes the canonical value. |
 | Model references an unknown column or enum value | Dropped and reported back in the response (`dropped_filters`) instead of silently ignored or crashing. |
 | Numeric filter needed but schema only supported equality (e.g. "not resolved within 12 hours") | Added `{"gt"/"gte"/"lt"/"lte": n}` comparison filters after live-testing revealed the gap. |
@@ -184,6 +191,7 @@ with real, messy phrasing — not just the documented sample queries.
 | Average/sum/min/max over an all-null or empty filtered set | Returns `None` and `matched: 0` rather than `NaN` or a crash. |
 | Groq rate limit hit | Distinct, actionable error message ("wait a moment and try again") instead of a generic failure. |
 | Groq request fails, times out, or returns malformed JSON | Every failure mode degrades to a clean JSON error; `extract_intent()` never raises. |
+| Groq's JSON-mode validator rejects a generation (e.g. the model tried to explain a limitation in prose) | Generic, accurate error message — never claims the question is off-topic, since this also fires for on-topic compound questions the model can't express in one operation. |
 | `GROQ_API_KEY` not configured | `/api/query` reports the missing key cleanly; `/health`, `/api/anomalies`, `/api/stats` remain fully usable. |
 | Response values containing NaN / pandas Timestamps / numpy scalars | Converted to JSON-safe types before serialization (`None`, ISO strings, native `int`/`float`) — this is verified by dedicated tests, not just assumed. |
 
@@ -262,13 +270,14 @@ pytest -m live                            # + real Groq smoke tests (needs GROQ_
 pytest --cov=app --cov-report=term-missing
 ```
 
-86 tests total (80 mocked + 6 live), 100% statement coverage on `app/`:
+98 tests total (91 mocked + 7 live), 100% statement coverage on `app/`:
 ingestion/schema validation, every query operation (including comparison
-filters, JSON-serialization safety, and the `equalize` operation), all
-anomaly rules including boundary and degenerate cases, LLM intent
+filters, JSON-serialization safety, and the `ratio`/`equalize` operations),
+all anomaly rules including boundary and degenerate cases, LLM intent
 validation against a mocked Groq client (malformed JSON, rate limits,
 case-insensitive enums, dropped filters, missing key), and FastAPI endpoint
 behavior including graceful degradation and evidence-envelope checks. The
 live tests hit the real Groq API to catch semantic failures a mock can't:
-off-topic questions, hypothetical/what-if questions, and known-answer
-questions verified against the real dataset.
+off-topic questions, hypothetical/what-if questions, the compound
+sum-and-ratio question, and known-answer questions verified against the
+real dataset.

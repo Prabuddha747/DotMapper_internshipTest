@@ -31,7 +31,7 @@ support_tickets.csv → ingestion.py → in-memory pandas DataFrame (app.state)
                        ┌────────────────────┼────────────────────┐
                        ▼                                          ▼
                  query_engine.py                            anomaly.py
-      (count/filter/group/avg/sum/min/max/ratio/equalize)   (IQR + rules)
+  (count/filter/group+rank/avg/sum/min/max/ratio/equalize/search)  (IQR + rules)
                        ▲
                        │ structured intent (JSON)
                     llm.py ── Groq API
@@ -58,9 +58,12 @@ none of the operations need a persistence layer beyond the source CSV.
 
 - **Ingestion** — loads the CSV once at startup into a validated in-memory
   DataFrame (schema and column-type checks fail fast, with a clear error).
-- **Natural-language querying** — count, filter, group-by, average, sum,
-  min, max, **ratio** (sum/average of two fields plus their ratio), and
-  **equalize** (see §6), each with optional equality, multi-value, and
+- **Natural-language querying** — count, filter, group-by (with optional
+  per-category ranking by average/sum of a field, ascending or descending,
+  and a top-N limit), average, sum, min, max (each identifying *which*
+  ticket produced the value), **ratio** (sum/average of two fields plus
+  their ratio), **equalize** (see §6), and **search** (substring match on
+  issue descriptions) — each with optional equality, multi-value, and
   numeric-comparison (`>`, `>=`, `<`, `<=`) filters.
 - **Anomaly detection** — three independent, explainable rules (overdue
   unresolved tickets, statistical resolution-time outliers, data-quality
@@ -172,6 +175,26 @@ statuses to make Open, Escalated, and Resolved equal?"**
 {"operation": "ratio", "field": "response_time_hrs", "field_b": "resolution_time_hrs", "agg": "sum"} → "sum of response_time_hrs: 1310.3; sum of resolution_time_hrs: 6264.8; ratio response_time_hrs/resolution_time_hrs = 0.2092."
 ```
 
+**"Which ticket has the highest resolution time?"**
+```
+{"operation": "max", "field": "resolution_time_hrs"} → "Maximum resolution_time_hrs: 119.7 (ticket TKT-108)."
+```
+
+**"Show the 5 categories with the highest average resolution time."**
+```
+{"operation": "group_count", "group_by": "category", "field": "resolution_time_hrs", "agg": "average", "order": "desc", "top_n": 5} → "Top category by average resolution_time_hrs (desc): Technical (20.59)."
+```
+
+**"What percentage of tickets are Critical?"**
+```
+{"operation": "group_count", "group_by": "priority"} → "Top priority: Medium (169 tickets, 33.8%)." (data.percentages.Critical = 11.0)
+```
+
+**"Find tickets mentioning login failure."**
+```
+{"operation": "search", "keyword": "login failure"} → "12 ticket(s) mention 'login failure', showing 12."
+```
+
 ## 7. Edge cases handled
 
 These were found and fixed by adversarially testing the running system
@@ -192,6 +215,7 @@ with real, messy phrasing — not just the documented sample queries.
 | Groq rate limit hit | Distinct, actionable error message ("wait a moment and try again") instead of a generic failure. |
 | Groq request fails, times out, or returns malformed JSON | Every failure mode degrades to a clean JSON error; `extract_intent()` never raises. |
 | Groq's JSON-mode validator rejects a generation (e.g. the model tried to explain a limitation in prose) | Generic, accurate error message — never claims the question is off-topic, since this also fires for on-topic compound questions the model can't express in one operation. |
+| "Which ticket has the highest/lowest X" | `min`/`max` identify the actual `ticket_id` that produced the value, not just the bare number. |
 | `GROQ_API_KEY` not configured | `/api/query` reports the missing key cleanly; `/health`, `/api/anomalies`, `/api/stats` remain fully usable. |
 | Response values containing NaN / pandas Timestamps / numpy scalars | Converted to JSON-safe types before serialization (`None`, ISO strings, native `int`/`float`) — this is verified by dedicated tests, not just assumed. |
 
@@ -250,9 +274,6 @@ ancient.
 - Parse an explicit N-hour threshold out of the question text for
   SLA-style queries, instead of relying on a fixed 24-hour anomaly rule or
   a single manually-specified comparison filter.
-- A free-text search operation over `issue_summary` (substring or
-  keyword match; no embeddings needed at this data size) for
-  "tickets mentioning X" style questions.
 - A lightweight per-session conversation history, so a follow-up question
   ("...and by agent?") can inherit filters from the previous one instead of
   needing to be fully self-contained.
@@ -261,6 +282,10 @@ ancient.
 - Expand `equalize`-style closed-form operations to other useful
   what-if-shaped-but-actually-deterministic questions, if real usage shows
   more of them.
+- A `correlation` operation (e.g. "is a lower rating associated with a
+  longer resolution time?") — `df[a].corr(df[b])` is the same "pure
+  arithmetic on real columns" safety class as `ratio`, just not built yet
+  since no question has asked for it live.
 
 ## 12. Testing
 
@@ -270,14 +295,14 @@ pytest -m live                            # + real Groq smoke tests (needs GROQ_
 pytest --cov=app --cov-report=term-missing
 ```
 
-98 tests total (91 mocked + 7 live), 100% statement coverage on `app/`:
+120 tests total (113 mocked + 7 live), 100% statement coverage on `app/`:
 ingestion/schema validation, every query operation (including comparison
-filters, JSON-serialization safety, and the `ratio`/`equalize` operations),
-all anomaly rules including boundary and degenerate cases, LLM intent
-validation against a mocked Groq client (malformed JSON, rate limits,
-case-insensitive enums, dropped filters, missing key), and FastAPI endpoint
-behavior including graceful degradation and evidence-envelope checks. The
-live tests hit the real Groq API to catch semantic failures a mock can't:
-off-topic questions, hypothetical/what-if questions, the compound
-sum-and-ratio question, and known-answer questions verified against the
-real dataset.
+filters, JSON-serialization safety, and the `ratio`/`equalize`/`search`
+operations and `group_count`'s field-ranking mode), all anomaly rules
+including boundary and degenerate cases, LLM intent validation against a
+mocked Groq client (malformed JSON, rate limits, case-insensitive enums,
+dropped filters, missing key), and FastAPI endpoint behavior including
+graceful degradation and evidence-envelope checks. The live tests hit the
+real Groq API to catch semantic failures a mock can't: off-topic questions,
+hypothetical/what-if questions, the compound sum-and-ratio question, and
+known-answer questions verified against the real dataset.

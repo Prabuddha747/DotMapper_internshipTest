@@ -15,7 +15,7 @@ from app.anomaly import ENUM_VALUES
 from app.ingestion import REQUIRED_COLUMNS
 from app.query_engine import NUMERIC_FIELDS
 
-OPERATIONS = ["count", "filter", "group_count", "average", "sum", "min", "max", "anomaly_summary", "equalize", "ratio"]
+OPERATIONS = ["count", "filter", "group_count", "average", "sum", "min", "max", "anomaly_summary", "equalize", "ratio", "search"]
 GROUPABLE_COLUMNS = ["agent_id", "category", "priority", "status"]
 
 
@@ -33,11 +33,21 @@ def _build_system_prompt() -> str:
         '{"operation": "count", "filters": {...}}\n'
         '{"operation": "filter", "filters": {...}, "limit": 50}\n'
         '{"operation": "group_count", "group_by": "<column>", "filters": {...}}\n'
+        '{"operation": "group_count", "group_by": "<column>", "field": "<numeric field>", "agg": "average"|"sum", "order": "desc"|"asc", "top_n": <int>, "filters": {...}} '
+        '(ranks categories by average/sum of a field, e.g. "5 categories with the highest average resolution time", or "which agent has the LOWEST rating" -> order "asc", top_n 1)\n'
         '{"operation": "average"|"sum"|"min"|"max", "field": "<numeric field>", "filters": {...}}\n'
         '{"operation": "anomaly_summary"}\n'
         '{"operation": "equalize", "group_by": "<column>"}\n'
         '{"operation": "ratio", "field": "<numeric field A>", "field_b": "<numeric field B>", "agg": "sum"|"average", "filters": {...}}\n'
+        '{"operation": "search", "keyword": "<text>", "filters": {...}, "limit": 50} '
+        '(substring match on issue_summary, e.g. "tickets mentioning login failure")\n'
         '{"operation": "error", "reason": "<why this question can\'t be answered>"}\n\n'
+        'For plain group_count (counting tickets per category, no "field"), the '
+        'response also reports each category\'s percentage share of the total — '
+        'use it for "what percentage of tickets are X" style questions instead '
+        'of a manual count/total computation. "top_n" limits either shape '
+        '(count or field-ranked) to its first N entries after ordering, e.g. '
+        '"top 5"/"bottom 5" or "highest"/"lowest".\n\n'
         '"filters" maps column -> value, column -> [values] (isin), or for a '
         'numeric field column -> {"gt"|"gte"|"lt"|"lte": number} (e.g. '
         '{"resolution_time_hrs": {"gt": 12}} for "resolution over 12 hours"). '
@@ -139,6 +149,24 @@ def _validate_intent(raw: dict) -> dict:
         if group_by not in GROUPABLE_COLUMNS:
             return {"operation": "error", "reason": f"invalid group_by from LLM: {group_by!r}"}
         intent["group_by"] = group_by
+
+    if operation == "group_count":
+        field = raw.get("field")
+        if field is not None:
+            if field not in NUMERIC_FIELDS:
+                return {"operation": "error", "reason": f"invalid field from LLM: {field!r}"}
+            intent["field"] = field
+            intent["agg"] = raw.get("agg") if raw.get("agg") in ("average", "sum") else "average"
+        intent["order"] = raw.get("order") if raw.get("order") in ("asc", "desc") else "desc"
+        if isinstance(raw.get("top_n"), int) and raw["top_n"] > 0:
+            intent["top_n"] = raw["top_n"]
+
+    if operation == "search":
+        keyword = raw.get("keyword")
+        if not isinstance(keyword, str) or not keyword.strip():
+            return {"operation": "error", "reason": f"invalid keyword from LLM: {keyword!r}"}
+        intent["keyword"] = keyword
+        intent["limit"] = raw.get("limit") if isinstance(raw.get("limit"), int) else 50
 
     if operation in ("average", "sum", "min", "max"):
         field = raw.get("field")

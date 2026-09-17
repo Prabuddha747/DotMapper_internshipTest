@@ -42,7 +42,35 @@ def test_case_insensitive_enum_value_is_normalized():
 def test_valid_group_count_intent_passes_through():
     with _mock_groq_returning('{"operation": "group_count", "group_by": "agent_id", "filters": {}}'):
         intent = llm.extract_intent("Which agent resolved the most tickets?")
-    assert intent == {"operation": "group_count", "filters": {}, "group_by": "agent_id"}
+    assert intent == {"operation": "group_count", "filters": {}, "group_by": "agent_id", "order": "desc"}
+
+
+def test_group_count_field_ranking_intent_passes_through():
+    with _mock_groq_returning(
+        '{"operation": "group_count", "group_by": "category", "field": "resolution_time_hrs", "agg": "average", "order": "desc", "top_n": 5}'
+    ):
+        intent = llm.extract_intent("5 categories with the highest average resolution time?")
+    assert intent["field"] == "resolution_time_hrs"
+    assert intent["agg"] == "average"
+    assert intent["top_n"] == 5
+
+
+def test_group_count_invalid_field_becomes_error():
+    with _mock_groq_returning('{"operation": "group_count", "group_by": "category", "field": "agent_id"}'):
+        intent = llm.extract_intent("rank categories by agent_id?")
+    assert intent["operation"] == "error"
+
+
+def test_valid_search_intent_passes_through():
+    with _mock_groq_returning('{"operation": "search", "keyword": "login failure"}'):
+        intent = llm.extract_intent("Find tickets mentioning login failure")
+    assert intent == {"operation": "search", "filters": {}, "keyword": "login failure", "limit": 50}
+
+
+def test_search_missing_keyword_becomes_error():
+    with _mock_groq_returning('{"operation": "search"}'):
+        intent = llm.extract_intent("search for something")
+    assert intent["operation"] == "error"
 
 
 def test_valid_average_intent_passes_through():

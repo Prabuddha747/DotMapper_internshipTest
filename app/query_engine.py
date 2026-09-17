@@ -75,18 +75,56 @@ def filter_rows(df: pd.DataFrame, filters: dict | None = None, limit: int = 50, 
     return _pack(answer, {"count": len(filtered), "tickets": rows}, unmatched, rows_used=len(filtered))
 
 
-def group_count(df: pd.DataFrame, group_by: str | None = None, filters: dict | None = None, **_) -> dict:
+def group_count(df: pd.DataFrame, group_by: str | None = None, field: str | None = None,
+                 agg: str = "average", order: str = "desc", top_n: int | None = None,
+                 filters: dict | None = None, **_) -> dict:
+    """Count per category (default), or rank categories by average/sum of a
+    numeric field when `field` is given (e.g. "5 categories with the highest
+    average resolution time", or "lowest" with order="asc"). `top_n` limits
+    either shape to its first N after ordering."""
     if group_by not in df.columns:
         raise ValueError(f"unknown group_by column: {group_by}")
     filtered, unmatched = _apply_filters(df, filters)
+    ascending = order == "asc"
+
+    if field:
+        _validate_numeric_field(field)
+        agg = agg if agg in ("average", "sum") else "average"
+        grouped = filtered.groupby(group_by)[field].agg("mean" if agg == "average" else "sum").dropna()
+        stats = {k: round(float(v), 2) for k, v in grouped.sort_values(ascending=ascending).items()}
+        if top_n:
+            stats = dict(list(stats.items())[:top_n])
+        top = next(iter(stats), None)
+        answer = (
+            f"Top {group_by} by {agg} {field} ({order}): {top} ({stats[top]})."
+            if top else f"No tickets match those filters to group by {group_by}."
+        )
+        return _pack(answer, {"stats": stats, "top": top, "metric": f"{agg} {field}"}, unmatched, rows_used=len(filtered))
+
     # int(v): value_counts() yields numpy.int64, which stdlib json can't serialize.
-    counts = {k: int(v) for k, v in filtered[group_by].value_counts().items()}
-    top = max(counts, key=counts.get) if counts else None
+    counts = {k: int(v) for k, v in filtered[group_by].value_counts().sort_values(ascending=ascending).items()}
+    if top_n:
+        counts = dict(list(counts.items())[:top_n])
+    total = len(filtered)
+    percentages = {k: round(v / total * 100, 1) for k, v in counts.items()} if total else {}
+    top = next(iter(counts), None)
     answer = (
-        f"Top {group_by}: {top} ({counts[top]} tickets)."
+        f"Top {group_by}: {top} ({counts[top]} tickets, {percentages[top]}%)."
         if top else f"No tickets match those filters to group by {group_by}."
     )
-    return _pack(answer, {"counts": counts, "top": top}, unmatched, rows_used=len(filtered))
+    return _pack(answer, {"counts": counts, "percentages": percentages, "top": top}, unmatched, rows_used=len(filtered))
+
+
+def search(df: pd.DataFrame, keyword: str | None = None, limit: int = 50, filters: dict | None = None, **_) -> dict:
+    """Case-insensitive substring match on issue_summary — plain text search,
+    no embeddings needed at this data size (docs/TRD.md §12)."""
+    if not keyword or not str(keyword).strip():
+        raise ValueError("search requires a non-empty keyword")
+    filtered, unmatched = _apply_filters(df, filters)
+    matched = filtered[filtered["issue_summary"].str.contains(keyword, case=False, na=False)]
+    rows = _records(matched, limit)
+    answer = f"{len(matched)} ticket(s) mention '{keyword}', showing {len(rows)}."
+    return _pack(answer, {"count": len(matched), "tickets": rows}, unmatched, rows_used=len(matched))
 
 
 def average(df: pd.DataFrame, field: str | None = None, filters: dict | None = None, **_) -> dict:
@@ -111,16 +149,22 @@ def minimum(df: pd.DataFrame, field: str | None = None, filters: dict | None = N
     _validate_numeric_field(field)
     filtered, unmatched = _apply_filters(df, filters)
     values = filtered[field].dropna()
-    result = values.min() if not values.empty else None
-    return _pack(f"Minimum {field}: {result}.", {"min": result, "matched": len(values)}, unmatched, rows_used=len(values))
+    if values.empty:
+        return _pack(f"Minimum {field}: None.", {"min": None, "ticket_id": None, "matched": 0}, unmatched, rows_used=0)
+    idx = values.idxmin()
+    result, ticket_id = values[idx], filtered.loc[idx, "ticket_id"]
+    return _pack(f"Minimum {field}: {result} (ticket {ticket_id}).", {"min": result, "ticket_id": ticket_id, "matched": len(values)}, unmatched, rows_used=len(values))
 
 
 def maximum(df: pd.DataFrame, field: str | None = None, filters: dict | None = None, **_) -> dict:
     _validate_numeric_field(field)
     filtered, unmatched = _apply_filters(df, filters)
     values = filtered[field].dropna()
-    result = values.max() if not values.empty else None
-    return _pack(f"Maximum {field}: {result}.", {"max": result, "matched": len(values)}, unmatched, rows_used=len(values))
+    if values.empty:
+        return _pack(f"Maximum {field}: None.", {"max": None, "ticket_id": None, "matched": 0}, unmatched, rows_used=0)
+    idx = values.idxmax()
+    result, ticket_id = values[idx], filtered.loc[idx, "ticket_id"]
+    return _pack(f"Maximum {field}: {result} (ticket {ticket_id}).", {"max": result, "ticket_id": ticket_id, "matched": len(values)}, unmatched, rows_used=len(values))
 
 
 def ratio(df: pd.DataFrame, field: str | None = None, field_b: str | None = None,
@@ -194,6 +238,7 @@ OPERATIONS = {
     "max": maximum,
     "ratio": ratio,
     "equalize": equalize,
+    "search": search,
 }
 
 

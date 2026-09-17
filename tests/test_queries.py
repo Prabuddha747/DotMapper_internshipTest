@@ -92,6 +92,91 @@ def test_group_count_values_are_json_serializable(df):
     json.dumps(result)
 
 
+def test_group_count_reports_percentage_share(df):
+    # real counts: Resolved 327, Open 111, Escalated 62 of 500
+    result = qe.group_count(df, group_by="status")
+    assert result["data"]["percentages"] == {"Resolved": 65.4, "Open": 22.2, "Escalated": 12.4}
+
+
+def test_group_count_ranks_by_field_average(df):
+    result = qe.group_count(df, group_by="category", field="resolution_time_hrs", agg="average")
+    assert result["data"]["top"] == "Technical"
+    assert result["data"]["stats"]["Technical"] == 20.59
+
+
+def test_group_count_field_ranking_respects_top_n(df):
+    result = qe.group_count(df, group_by="category", field="resolution_time_hrs", top_n=1)
+    assert len(result["data"]["stats"]) == 1
+
+
+def test_group_count_field_ranking_ascending_order(df):
+    # order="asc" must flip which category is "top" vs. desc
+    desc = qe.group_count(df, group_by="category", field="resolution_time_hrs", order="desc")
+    asc = qe.group_count(df, group_by="category", field="resolution_time_hrs", order="asc")
+    assert desc["data"]["top"] != asc["data"]["top"]
+    assert asc["data"]["top"] == "Billing"
+
+
+def test_group_count_count_based_ascending_order(df):
+    result = qe.group_count(df, group_by="status", order="asc")
+    assert result["data"]["top"] == "Escalated"  # smallest count (62) of the three
+
+
+def test_group_count_count_based_respects_top_n(df):
+    result = qe.group_count(df, group_by="status", top_n=1)
+    assert list(result["data"]["counts"].keys()) == ["Resolved"]
+
+
+def test_group_count_field_ranking_invalid_field_raises(df):
+    with pytest.raises(ValueError, match="not numeric"):
+        qe.group_count(df, group_by="category", field="agent_id")
+
+
+def test_group_count_field_ranking_values_are_json_serializable(df):
+    result = qe.group_count(df, group_by="category", field="resolution_time_hrs")
+    json.dumps(result)
+
+
+# --- search: substring match on issue_summary ---
+
+def test_search_finds_matching_tickets(df):
+    result = qe.search(df, keyword="refund")
+    assert result["data"]["count"] == 20
+    assert all("refund" in t["issue_summary"].lower() for t in result["data"]["tickets"])
+
+
+def test_search_is_case_insensitive(df):
+    result = qe.search(df, keyword="REFUND")
+    assert result["data"]["count"] == 20
+
+
+def test_search_no_matches_returns_zero_not_error(df):
+    result = qe.search(df, keyword="xyznonexistentkeyword")
+    assert result["data"]["count"] == 0
+    assert result["data"]["tickets"] == []
+
+
+def test_search_empty_keyword_raises(df):
+    with pytest.raises(ValueError, match="keyword"):
+        qe.search(df, keyword="")
+
+
+def test_search_respects_filters(df):
+    result = qe.search(df, keyword="refund", filters={"status": "Resolved"})
+    assert all(t["status"] == "Resolved" for t in result["data"]["tickets"])
+
+
+def test_search_respects_limit(df):
+    result = qe.search(df, keyword="refund", limit=2)
+    assert len(result["data"]["tickets"]) == 2
+    assert result["data"]["count"] == 20  # count is the real total match, limit only caps rows returned
+
+
+def test_run_dispatches_to_search(df):
+    result = qe.run(df, "search", keyword="refund")
+    assert result["data"]["count"] == 20
+
+
 def test_comparison_filter_gt(df):
     result = qe.count(df, filters={"resolution_time_hrs": {"gt": 12}})
     expected = (df["resolution_time_hrs"] > 12).sum()
@@ -125,6 +210,26 @@ def test_min(df):
 def test_max(df):
     result = qe.maximum(df, field="resolution_time_hrs")
     assert result["data"]["max"] == 119.7
+
+
+def test_max_identifies_which_ticket(df):
+    # a bare number is not a useful answer to "which ticket has the highest
+    # resolution time" — the response must name the actual ticket.
+    result = qe.maximum(df, field="resolution_time_hrs")
+    assert result["data"]["ticket_id"] == "TKT-108"
+    assert "TKT-108" in result["answer"]
+
+
+def test_min_identifies_which_ticket(df):
+    result = qe.minimum(df, field="resolution_time_hrs")
+    assert result["data"]["ticket_id"] is not None
+    assert result["data"]["ticket_id"] in result["answer"]
+
+
+def test_min_max_ticket_id_none_on_empty_set(df):
+    empty_filters = {"priority": "Nonexistent"}
+    assert qe.minimum(df, field="resolution_time_hrs", filters=empty_filters)["data"]["ticket_id"] is None
+    assert qe.maximum(df, field="resolution_time_hrs", filters=empty_filters)["data"]["ticket_id"] is None
 
 
 def test_rows_used_present_on_every_operation(df):
